@@ -1,0 +1,145 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum PassStatus {
+  PENDING
+  ACTIVE
+  CHECKED_IN
+  EXPIRED
+  REVOKED
+}
+
+enum GateAccessStatus {
+  GRANTED
+  DENIED_INVALID_CODE
+  DENIED_EXPIRED
+  DENIED_NOT_YET_VALID
+  DENIED_REVOKED
+  DENIED_ALREADY_CHECKED_IN
+  DENIED_MANUAL_INCIDENT
+  EXIT_GRANTED
+  DENIED_NO_ACTIVE_ENTRY
+}
+
+model Estate {
+  id        String   @id @default(cuid())
+  name      String
+  code      String   @unique
+  units     Unit[]
+  gates     Gate[]
+  createdAt DateTime @default(now())
+}
+
+model Unit {
+  id         String        @id @default(cuid())
+  unitNumber String
+  estateId   String
+  estate     Estate        @relation(fields: [estateId], references: [id])
+  passes     VisitorPass[]
+
+  // WhatsApp sender number (E.164, e.g. "27821234567") for the resident
+  // who may issue passes for this unit and receives arrival alerts.
+  residentPhone String? @unique
+
+  @@index([estateId])
+}
+
+model VisitorPass {
+  id           String     @id @default(cuid())
+  unitId       String
+  unit         Unit       @relation(fields: [unitId], references: [id])
+  visitorName  String
+  visitorPhone String
+
+  // The 6-digit OTP is never stored in plaintext. accessCodeHash is
+  // HMAC-SHA256(ACCESS_CODE_SECRET, otp) so a leaked DB row can't be
+  // used to walk through the gate, while still allowing an O(1) lookup
+  // by hash at the boom (see lib/access-code.ts).
+  accessCodeHash String @unique
+
+  status    PassStatus @default(PENDING)
+  validFrom DateTime
+  validTo   DateTime
+
+  // Contractor/recurring-visitor passes that stay ACTIVE across repeat
+  // scans within their validity window, instead of flipping to CHECKED_IN
+  // and denying the next entry.
+  isMultiEntry Boolean @default(false)
+  entryCount   Int     @default(0)
+
+  // True from a granted gate entry until check-out. Distinct from `status`
+  // because a multi-entry pass stays ACTIVE across visits — this is the
+  // only signal for "currently on the estate" for those passes, and it's
+  // what /api/gate/check-out matches against.
+  isInside Boolean @default(false)
+
+  // Entry log data captured at the boom gate
+  licensePlate  String?
+  vehicleMake   String?
+  vehicleColor  String?
+  licenceDiscNo String?
+  discExpired   Boolean?
+  checkedInAt   DateTime?
+  checkedOutAt  DateTime?
+  checkedInGateId String?
+  checkedInGate   Gate?    @relation(fields: [checkedInGateId], references: [id])
+
+  accessLogs GateAccessLog[]
+
+  createdAt DateTime @default(now())
+
+  @@index([unitId])
+  @@index([status])
+  @@index([validTo])
+  @@index([licensePlate, isInside])
+}
+
+model Gate {
+  id         String          @id @default(cuid())
+  name       String // e.g., "Main Boom North"
+  estateId   String
+  estate     Estate          @relation(fields: [estateId], references: [id])
+  checkIns   VisitorPass[]
+  accessLogs GateAccessLog[]
+
+  @@index([estateId])
+}
+
+// Append-only audit trail for every gate scan attempt (granted or denied),
+// including scans made offline on the tablet and synced later. This is
+// distinct from VisitorPass.checkedInAt: a pass has one current check-in
+// state, this log has one row per scan attempt, ever.
+model GateAccessLog {
+  id            String            @id @default(cuid())
+  passId        String?
+  visitorPass   VisitorPass?      @relation(fields: [passId], references: [id])
+  gateId        String
+  gate          Gate              @relation(fields: [gateId], references: [id])
+  // Null for manual guard incidents (DENIED_MANUAL_INCIDENT), which aren't
+  // tied to a submitted OTP.
+  accessCodeHash String?
+  // Guard-entered free text, only populated for DENIED_MANUAL_INCIDENT.
+  reason        String?
+  licensePlate  String?
+  licenceDiscNo String?
+  vehicleMake   String?
+  scannedAt     DateTime
+  syncedAt      DateTime          @default(now())
+  isOfflineSync Boolean           @default(false)
+
+  // UUID generated client-side on the gate tablet at scan time. Persisted
+  // so a batch re-sync (tablet retries a partially-failed flush) never
+  // double-processes the same scan.
+  idempotencyKey String           @unique
+  status         GateAccessStatus
+
+  @@index([gateId])
+  @@index([passId])
+  @@index([scannedAt])
+}
