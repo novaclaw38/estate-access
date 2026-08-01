@@ -1290,15 +1290,39 @@ curl -s -X POST http://localhost:3000/api/gate/check-in \
   -d '{"idempotencyKey":"test-1","accessCode":"123456","gateId":"demo-gate-1","scannedAt":"2026-08-02T00:00:00Z"}'
 ```
 
-Expected: `{"error":"Not authenticated"}`, 401. Then log in as staff at `/staff/login`, grab the session cookie, and confirm a call with a valid session and `demo-gate-1` still works (should now return the normal `DENIED_INVALID_CODE` result for a bogus access code, not a 401):
+Expected: `{"error":"Not authenticated"}`, 401.
+
+There is no durable staff account yet at this point in the plan (the bootstrap admin is seeded in Task 12, later) — seed a temporary one the same way Task 3 Step 5 and Task 7 Step 2 did, sign in, then confirm an authenticated call to `demo-gate-1` returns the normal `DENIED_INVALID_CODE` result for a bogus code, not a 401:
 
 ```bash
-curl -s -b /tmp/estate-auth-cookies.txt -X POST http://localhost:3000/api/gate/check-in \
+npx tsx -e '
+import { prisma } from "./src/lib/prisma";
+import { hashPassword } from "./src/lib/auth/password";
+(async () => {
+  const estate = await prisma.estate.findFirst();
+  await prisma.user.upsert({
+    where: { email: "test-admin@example.com" },
+    update: {},
+    create: { email: "test-admin@example.com", passwordHash: await hashPassword("test-password-123"), role: "ESTATE_ADMIN", estateId: estate!.id },
+  });
+})();
+'
+COOKIE_JAR=/tmp/estate-auth-cookies-task10.txt
+CSRF=$(curl -s -c "$COOKIE_JAR" http://localhost:3000/api/auth/csrf | node -e 'process.stdin.on("data",d=>console.log(JSON.parse(d).csrfToken))')
+curl -s -b "$COOKIE_JAR" -c "$COOKIE_JAR" -X POST http://localhost:3000/api/auth/callback/staff-login \
+  -d "email=test-admin@example.com&password=test-password-123&csrfToken=$CSRF&json=true" > /dev/null
+
+curl -s -b "$COOKIE_JAR" -X POST http://localhost:3000/api/gate/check-in \
   -H "Content-Type: application/json" \
   -d '{"idempotencyKey":"test-2","accessCode":"999999","gateId":"demo-gate-1","scannedAt":"2026-08-02T00:00:00Z"}'
 ```
 
-Expected: `{"success":true,"processed":[{"idempotencyKey":"test-2","success":false,"status":"DENIED_INVALID_CODE","unitNumber":null}]}`.
+Expected: `{"success":true,"processed":[{"idempotencyKey":"test-2","success":false,"status":"DENIED_INVALID_CODE","unitNumber":null}]}`. Clean up afterward:
+
+```bash
+npx tsx -e 'import { prisma } from "./src/lib/prisma"; prisma.user.delete({ where: { email: "test-admin@example.com" } }).then(() => prisma.$disconnect());'
+rm -f /tmp/estate-auth-cookies-task10.txt
+```
 
 - [ ] **Step 5: Commit**
 
@@ -1449,7 +1473,28 @@ npx tsc --noEmit -p tsconfig.json
 npx eslint .
 ```
 
-Then in the browser: sign in at `/staff/login`, land on `/gate`, confirm only `Main Boom North` (the demo estate's gate) is listed, open it, confirm the terminal loads and now has a "SIGN OUT" button in the header, click it, confirm it redirects to `/staff/login` and that revisiting `/gate/demo-gate-1` now redirects back to `/staff/login` (per Task 8's middleware).
+There is no durable staff account yet at this point in the plan (the bootstrap admin is seeded in Task 12, later) — seed a temporary one the same way Task 3 Step 5 and Task 7 Step 2 did:
+
+```bash
+npx tsx -e '
+import { prisma } from "./src/lib/prisma";
+import { hashPassword } from "./src/lib/auth/password";
+(async () => {
+  const estate = await prisma.estate.findFirst();
+  await prisma.user.upsert({
+    where: { email: "test-admin@example.com" },
+    update: {},
+    create: { email: "test-admin@example.com", passwordHash: await hashPassword("test-password-123"), role: "ESTATE_ADMIN", estateId: estate!.id },
+  });
+})();
+'
+```
+
+Then in the browser: sign in at `/staff/login` with `test-admin@example.com` / `test-password-123`, land on `/gate`, confirm only `Main Boom North` (the demo estate's gate) is listed, open it, confirm the terminal loads and now has a "SIGN OUT" button in the header, click it, confirm it redirects to `/staff/login` and that revisiting `/gate/demo-gate-1` now redirects back to `/staff/login` (per Task 8's middleware). Clean up afterward:
+
+```bash
+npx tsx -e 'import { prisma } from "./src/lib/prisma"; prisma.user.delete({ where: { email: "test-admin@example.com" } }).then(() => prisma.$disconnect());'
+```
 
 - [ ] **Step 5: Commit**
 
